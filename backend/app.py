@@ -699,6 +699,13 @@ def read_stores() -> list[dict[str, str]]:
     return normalized
 
 
+def default_store(stores: list[dict[str, str]]) -> dict[str, str]:
+    """Use the first configured store as the dashboard default."""
+    if not stores:
+        raise RuntimeError("SHOPIFY_STORES_JSON 未配置任何店铺")
+    return stores[0]
+
+
 async def get_access_token(client: httpx.AsyncClient, store: dict[str, str]) -> str:
     response = await client.post(
         f"https://{store['store']}/admin/oauth/access_token",
@@ -881,10 +888,9 @@ def percentage_change(current: Decimal | int, previous: Decimal | int) -> float 
     return round((current_value - previous_value) / previous_value * 100, 1)
 
 
-def totals_for(db: Session, start: date, end: date, store: str | None) -> dict[str, Any]:
+def totals_for(db: Session, start: date, end: date, store: str) -> dict[str, Any]:
     conditions = [Order.order_date >= start, Order.order_date < end, Order.cancelled_at.is_(None), Order.is_test.is_(False)]
-    if store:
-        conditions.append(Order.store_domain == store)
+    conditions.append(Order.store_domain == store)
     row = db.execute(
         select(
             func.count(Order.id),
@@ -904,7 +910,7 @@ def totals_for(db: Session, start: date, end: date, store: str | None) -> dict[s
     }
 
 
-def dashboard_payload(db: Session, start: date, end: date, store: str | None, tz_name: str = DEFAULT_TIMEZONE) -> dict[str, Any]:
+def dashboard_payload(db: Session, start: date, end: date, store: str, tz_name: str = DEFAULT_TIMEZONE) -> dict[str, Any]:
     days = (end - start).days
     previous_start = start - timedelta(days=days)
     current = totals_for(db, start, end, store)
@@ -915,8 +921,7 @@ def dashboard_payload(db: Session, start: date, end: date, store: str | None, tz
     }
 
     base_conditions = [Order.order_date >= start, Order.order_date < end, Order.cancelled_at.is_(None), Order.is_test.is_(False)]
-    if store:
-        base_conditions.append(Order.store_domain == store)
+    base_conditions.append(Order.store_domain == store)
 
     daily_rows = db.execute(
         select(
@@ -977,7 +982,7 @@ def dashboard_payload(db: Session, start: date, end: date, store: str | None, tz
 
     return {
         "period": {"days": days, "start": start.isoformat(), "end": (end - timedelta(days=1)).isoformat()},
-        "store": store or "all",
+        "store": store,
         "currency": currency,
         "totals": current,
         "daily": daily,
@@ -1580,8 +1585,11 @@ async def dashboard(
     try:
         require_business_access(x_sync_key)
         stores = read_stores()
-        matched = [s for s in stores if s["store"] == store] if store else stores
-        tz_name = matched[0]["timezone"] if matched else DEFAULT_TIMEZONE
+        selected_store = next((item for item in stores if item["store"] == store), None) if store else default_store(stores)
+        if selected_store is None:
+            raise HTTPException(status_code=422, detail="经营主体不存在")
+        store = selected_store["store"]
+        tz_name = selected_store["timezone"]
         today = store_today(tz_name)
         if (start_date is None) != (end_date is None):
             raise HTTPException(status_code=422, detail="自定义日期需要同时提供开始日期和结束日期")

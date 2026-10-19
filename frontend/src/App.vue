@@ -182,7 +182,9 @@ async function loadDashboard({ autoSync = true } = {}) {
       dashboard.value = null
       return
     }
-    dashboard.value = await api(`/api/dashboard?${buildDashboardQuery(autoSync)}`)
+    const nextDashboard = await api(`/api/dashboard?${buildDashboardQuery(autoSync)}`)
+    if (!store.value && nextDashboard.store) store.value = nextDashboard.store
+    dashboard.value = nextDashboard
   } catch (exception) {
     error.value = exception.message
   } finally {
@@ -295,7 +297,7 @@ onBeforeUnmount(() => {
         </label>
         <label class="filter-field">
           <span>经营主体</span>
-          <div class="select-wrap"><select v-model="store"><option value="">全部店铺</option><option v-for="item in dashboard?.stores || []" :key="item.domain" :value="item.domain">{{ item.name }}</option></select><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg></div>
+          <div class="select-wrap"><select v-model="store"><option v-for="item in dashboard?.stores || []" :key="item.domain" :value="item.domain">{{ item.name }}</option></select><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg></div>
         </label>
         <div v-if="period === 'custom'" class="custom-date-group">
           <label class="filter-field"><span>开始日期</span><input v-model="customStart" type="date" :max="customEnd || undefined"></label>
