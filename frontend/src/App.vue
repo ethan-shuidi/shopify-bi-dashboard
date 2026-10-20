@@ -4,7 +4,7 @@ import { init, use } from "echarts/core"
 import { BarChart, LineChart } from "echarts/charts"
 import { AriaComponent, GridComponent, LegendComponent, TooltipComponent } from "echarts/components"
 import { CanvasRenderer } from "echarts/renderers"
-import { fetchWithDashboardAuth, syncPublicKey } from "./dashboardAuth"
+import { fetchWithDashboardAuth } from "./dashboardAuth"
 
 use([LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent, AriaComponent, CanvasRenderer])
 
@@ -161,8 +161,8 @@ async function api(path, options = {}) {
   return body
 }
 
-function buildDashboardQuery(autoSync) {
-  const query = new URLSearchParams({ auto_sync: String(autoSync) })
+function buildDashboardQuery() {
+  const query = new URLSearchParams()
   if (period.value === "custom") {
     query.set("start_date", customStart.value)
     query.set("end_date", customEnd.value)
@@ -182,7 +182,7 @@ async function loadDashboard({ autoSync = true } = {}) {
       dashboard.value = null
       return
     }
-    const nextDashboard = await api(`/api/dashboard?${buildDashboardQuery(autoSync)}`)
+    const nextDashboard = await api(`/api/dashboard?${buildDashboardQuery()}`)
     if (!store.value && nextDashboard.store) store.value = nextDashboard.store
     dashboard.value = nextDashboard
   } catch (exception) {
@@ -216,7 +216,6 @@ async function syncNow() {
   error.value = ""
   notice.value = ""
   try {
-    await api("/api/sync?trigger=button", { method: "POST", headers: { "X-Sync-Public-Key": syncPublicKey } })
     await loadDashboard({ autoSync: false })
     notice.value = "已刷新当前数据"
   } catch (exception) {
@@ -240,14 +239,6 @@ onMounted(async () => {
   })
   await loadRuntime()
   await loadDashboard({ autoSync: false })
-  if (status.value?.configured && syncPublicKey) {
-    try {
-      await api("/api/sync?trigger=dashboard", { method: "POST", headers: { "X-Sync-Public-Key": syncPublicKey } })
-      await loadDashboard({ autoSync: false })
-    } catch (exception) {
-      error.value = exception.message
-    }
-  }
   await nextTick()
   if (salesChartElement.value) resizeObserver.observe(salesChartElement.value)
   if (productChartElement.value) resizeObserver.observe(productChartElement.value)
@@ -275,7 +266,7 @@ onBeforeUnmount(() => {
         <div>
           <div class="breadcrumb"><span>数据中心</span><i>/</i><strong>Shopify 经营概览</strong></div>
           <h1>Shopify数据看板</h1>
-          <p>集中查看销售、商品与履约表现，数据按需同步。</p>
+          <p>集中查看销售、商品与履约表现，数据实时来自 Shopify。</p>
         </div>
         <div class="page-header-actions">
           <div class="topbar-center" aria-label="Shopify 数据服务状态">
@@ -285,7 +276,7 @@ onBeforeUnmount(() => {
           <span class="period-badge" v-if="dashboard">{{ periodLabel }}</span>
           <button class="sync-button" :disabled="syncing || !status?.configured" @click="syncNow">
             <svg :class="['sync-icon', { spinning: syncing }]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 9a7 7 0 0111.7-2L20 12M4 12l2.2 5a7 7 0 0011.7-2"/></svg>
-            <span>{{ syncing ? "同步中" : "立即同步" }}</span>
+            <span>{{ syncing ? "刷新中" : "刷新数据" }}</span>
           </button>
         </div>
       </section>
@@ -313,7 +304,7 @@ onBeforeUnmount(() => {
 
       <section v-else-if="status && !status.configured" class="setup-card">
         <div class="setup-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7Z"/><path d="M19.4 15a1.7 1.7 0 00.34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 00-1.88-.34 1.7 1.7 0 00-1.03 1.56V21h-4v-.08A1.7 1.7 0 009 19.36a1.7 1.7 0 00-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 004.63 15a1.7 1.7 0 00-1.56-1.03H3v-4h.08A1.7 1.7 0 004.64 9a1.7 1.7 0 00-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 009 4.63 1.7 1.7 0 0010.03 3H10V3h4v.08A1.7 1.7 0 0015 4.64a1.7 1.7 0 001.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0019.37 9a1.7 1.7 0 001.56 1.03H21v4h-.08A1.7 1.7 0 0019.4 15Z"/></svg></div>
-        <div><p class="section-label">一次性配置</p><h2>连接 Shopify 数据源</h2><p>请在 IdeaDock 后端服务中配置 Secret <code>SHOPIFY_STORES_JSON</code>，然后返回本页点击“立即同步”。</p><p class="security-note">凭据只保存在 IdeaDock Secret 中，不会进入前端或数据库。</p></div>
+        <div><p class="section-label">一次性配置</p><h2>连接 Shopify 数据源</h2><p>请在 IdeaDock 后端服务中配置 Secret <code>SHOPIFY_STORES_JSON</code>，然后返回本页刷新数据。</p><p class="security-note">凭据只保存在 IdeaDock Secret 中，不会进入前端或数据库。</p></div>
       </section>
 
       <template v-else-if="dashboard">

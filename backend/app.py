@@ -202,7 +202,7 @@ class OrderItem(Base):
 
 SHOPIFY_ORDERS_QUERY = """#graphql
 query Orders($first: Int!, $after: String, $search: String!) {
-  orders(first: $first, after: $after, query: $search, sortKey: UPDATED_AT, reverse: false) {
+  orders(first: $first, after: $after, query: $search, sortKey: CREATED_AT, reverse: false) {
     pageInfo { hasNextPage endCursor }
     edges { node {
       id name createdAt updatedAt cancelledAt test
@@ -752,6 +752,42 @@ async def fetch_orders(store: dict[str, str], updated_since: date) -> list[dict[
     return orders
 
 
+async def fetch_orders_for_dates(store: dict[str, str], start: date, end: date) -> list[dict[str, Any]]:
+    """Fetch the selected period directly from Shopify by creation date.
+
+    The one-day padding protects orders near midnight when the store timezone
+    differs from UTC; the final local-date filter is applied during aggregation.
+    """
+    search_start = start - timedelta(days=1)
+    search_end = end + timedelta(days=1)
+    search = f"status:any created_at:>={search_start.isoformat()} created_at:<{search_end.isoformat()}"
+    orders: list[dict[str, Any]] = []
+    after = None
+    timeout = httpx.Timeout(45.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        token = await get_access_token(client, store)
+        while True:
+            response = await client.post(
+                f"https://{store['store']}/admin/api/{store['api_version']}/graphql.json",
+                headers={"x-shopify-access-token": token, "content-type": "application/json"},
+                json={
+                    "query": SHOPIFY_ORDERS_QUERY,
+                    "variables": {"first": 250, "after": after, "search": search},
+                },
+            )
+            response.raise_for_status()
+            body = response.json()
+            if body.get("errors"):
+                raise RuntimeError(f"Shopify GraphQL error: {body['errors'][0].get('message', 'unknown error')}")
+            data = body["data"]["orders"]
+            orders.extend(edge["node"] for edge in data.get("edges", []))
+            page_info = data.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+    return orders
+
+
 def order_local_date(created_at: datetime, timezone_name: str) -> date:
     tz = ZoneInfo(timezone_name)
     utc_dt = created_at.replace(tzinfo=timezone.utc)
@@ -910,96 +946,89 @@ def totals_for(db: Session, start: date, end: date, store: str) -> dict[str, Any
     }
 
 
-def dashboard_payload(db: Session, start: date, end: date, store: str, tz_name: str = DEFAULT_TIMEZONE) -> dict[str, Any]:
+def live_order_row(payload: dict[str, Any], store: dict[str, str]) -> dict[str, Any] | None:
+    """Normalize one Shopify order for direct, non-persisted aggregation."""
+    if bool(payload.get("test")):
+        return None
+    created_at = parse_datetime(payload.get("createdAt"))
+    if created_at is None:
+        return None
+    items = [classify_item(edge["node"]) for edge in (payload.get("lineItems") or {}).get("edges", [])]
+    current_total = payload.get("currentTotalPriceSet") or payload.get("totalPriceSet") or {}
+    refunded = payload.get("totalRefundedSet") or {}
+    money = (current_total.get("shopMoney") or {}).get("amount")
+    refund = (refunded.get("shopMoney") or {}).get("amount")
+    return {
+        "date": order_local_date(created_at, store["timezone"]),
+        "currency": payload.get("currencyCode") or "USD",
+        "sales": float(decimal_value(money)),
+        "refunds": float(decimal_value(refund)),
+        "units": sum(item["effective_units"] for item in items),
+        "items": items,
+        "fulfillment": payload.get("displayFulfillmentStatus") or "UNKNOWN",
+    }
+
+
+async def live_dashboard_payload(store: dict[str, str], start: date, end: date) -> dict[str, Any]:
+    """Build the Shopify dashboard from the requested live API range."""
     days = (end - start).days
     previous_start = start - timedelta(days=days)
-    current = totals_for(db, start, end, store)
-    previous = totals_for(db, previous_start, start, store)
-    current["changes"] = {
-        key: percentage_change(current[key], previous[key])
-        for key in ("orders", "sales", "refunds", "net_sales", "units", "presale_units")
-    }
+    payloads = await fetch_orders_for_dates(store, previous_start, end)
+    rows = [row for payload in payloads if (row := live_order_row(payload, store)) is not None]
 
-    base_conditions = [Order.order_date >= start, Order.order_date < end, Order.cancelled_at.is_(None), Order.is_test.is_(False)]
-    base_conditions.append(Order.store_domain == store)
-
-    daily_rows = db.execute(
-        select(
-            Order.order_date,
-            func.count(Order.id),
-            func.coalesce(func.sum(Order.sales_amount), 0),
-            func.coalesce(func.sum(Order.refund_amount), 0),
-            func.coalesce(func.sum(Order.unit_count), 0),
-        )
-        .where(*base_conditions)
-        .group_by(Order.order_date)
-        .order_by(Order.order_date)
-    ).all()
-    daily_map = {
-        row[0]: {
-            "date": row[0].isoformat(),
-            "orders": int(row[1]),
-            "sales": float(row[2]),
-            "refunds": float(row[3]),
-            "units": int(row[4]),
+    def aggregate(range_start: date, range_end: date) -> dict[str, Any]:
+        selected = [row for row in rows if range_start <= row["date"] < range_end]
+        sales = sum(row["sales"] for row in selected)
+        refunds = sum(row["refunds"] for row in selected)
+        sku_totals: dict[tuple[str, str], int] = {}
+        fulfillment_totals: dict[str, int] = {}
+        daily: dict[date, dict[str, Any]] = {}
+        for row in selected:
+            fulfillment_totals[row["fulfillment"]] = fulfillment_totals.get(row["fulfillment"], 0) + 1
+            day = daily.setdefault(row["date"], {"date": row["date"].isoformat(), "orders": 0, "sales": 0.0, "refunds": 0.0, "units": 0})
+            day["orders"] += 1
+            day["sales"] += row["sales"]
+            day["refunds"] += row["refunds"]
+            day["units"] += row["units"]
+            for item in row["items"]:
+                if item["item_type"] not in {"product", "final_payment"}:
+                    continue
+                key = (item["sku"], item["color"])
+                sku_totals[key] = sku_totals.get(key, 0) + item["effective_units"]
+        cursor = range_start
+        daily_rows = []
+        while cursor < range_end:
+            daily_rows.append(daily.get(cursor, {"date": cursor.isoformat(), "orders": 0, "sales": 0.0, "refunds": 0.0, "units": 0}))
+            cursor += timedelta(days=1)
+        return {
+            "orders": len(selected),
+            "sales": sales,
+            "refunds": refunds,
+            "net_sales": sales - refunds,
+            "units": sum(row["units"] for row in selected),
+            "presale_units": sum(item["raw_quantity"] * item["unit_multiplier"] for row in selected for item in row["items"] if item["item_type"] == "presale"),
+            "daily": daily_rows,
+            "sku_breakdown": [{"sku": sku, "color": color, "units": units} for (sku, color), units in sorted(sku_totals.items(), key=lambda pair: pair[1], reverse=True)[:12]],
+            "fulfillment": [{"status": status, "orders": count} for status, count in sorted(fulfillment_totals.items(), key=lambda pair: pair[1], reverse=True)],
+            "currency": next((row["currency"] for row in selected), "USD"),
         }
-        for row in daily_rows
-    }
-    daily = []
-    cursor = start
-    while cursor < end:
-        daily.append(daily_map.get(cursor, {"date": cursor.isoformat(), "orders": 0, "sales": 0, "refunds": 0, "units": 0}))
-        cursor += timedelta(days=1)
 
-    item_conditions = list(base_conditions)
-    sku_rows = db.execute(
-        select(
-            OrderItem.sku,
-            OrderItem.color,
-            func.coalesce(func.sum(OrderItem.effective_units), 0),
-        )
-        .join(Order, Order.id == OrderItem.order_id)
-        .where(*item_conditions, OrderItem.item_type.in_(["product", "final_payment"]))
-        .group_by(OrderItem.sku, OrderItem.color)
-        .order_by(func.sum(OrderItem.effective_units).desc())
-        .limit(12)
-    ).all()
-
-    fulfillment_rows = db.execute(
-        select(Order.fulfillment_status, func.count(Order.id))
-        .where(*base_conditions)
-        .group_by(Order.fulfillment_status)
-        .order_by(func.count(Order.id).desc())
-    ).all()
-
-    stores = db.execute(
-        select(Order.store_domain, Order.store_name)
-        .distinct()
-        .order_by(Order.store_domain, Order.store_name)
-    ).all()
-    last = latest_success(db)
-    currency = db.scalar(select(Order.currency).where(*base_conditions).limit(1)) or "USD"
-
+    current = aggregate(start, end)
+    previous = aggregate(previous_start, start)
+    current["changes"] = {key: percentage_change(current[key], previous[key]) for key in ("orders", "sales", "refunds", "net_sales", "units", "presale_units")}
     return {
         "period": {"days": days, "start": start.isoformat(), "end": (end - timedelta(days=1)).isoformat()},
-        "store": store,
-        "currency": currency,
-        "totals": current,
-        "daily": daily,
-        "sku_breakdown": [
-            {"sku": row[0], "color": row[1], "units": int(row[2] or 0)} for row in sku_rows
-        ],
-        "fulfillment": [
-            {"status": row[0] or "UNKNOWN", "orders": int(row[1])} for row in fulfillment_rows
-        ],
-        "stores": [{"domain": row[0], "name": row[1]} for row in stores],
-        "last_sync": {
-            "at": last.finished_at.isoformat() if last and last.finished_at else None,
-            "message": last.message if last else "尚未同步",
-        },
-        "timezone": tz_name,
+        "store": store["store"],
+        "currency": current.pop("currency"),
+        "totals": {key: current[key] for key in ("orders", "sales", "refunds", "net_sales", "units", "presale_units", "changes")},
+        "daily": current["daily"],
+        "sku_breakdown": current["sku_breakdown"],
+        "fulfillment": current["fulfillment"],
+        "stores": [{"domain": item["store"], "name": item["name"]} for item in read_stores()],
+        "last_sync": {"at": utcnow().isoformat(), "message": "已直接从 Shopify 实时读取"},
+        "timezone": store["timezone"],
+        "timezone_note": f"数据来自 Shopify 实时查询 · {store['timezone']}",
     }
-
 
 @app.get("/health")
 def health():
@@ -1028,11 +1057,11 @@ def status():
     database_configured = bool(os.environ.get("DATABASE_URL", "").strip())
     amazon_configured = bool(os.environ.get("LINGXING_APP_ID") and os.environ.get("LINGXING_APP_SECRET"))
     return {
-        "configured": configured and database_configured,
+        "configured": configured,
         "shopify_configured": configured,
         "database_configured": database_configured,
         "amazon_configured": amazon_configured,
-        "sync_mode": "on_demand",
+        "sync_mode": "live",
     }
 
 
@@ -1604,14 +1633,7 @@ async def dashboard(
         else:
             period_end = today + timedelta(days=1)
             period_start = period_end - timedelta(days=days)
-        factory = session_factory()
-        if auto_sync:
-            configured_key = os.environ.get("SYNC_API_KEY", "").strip()
-            if not configured_key or x_sync_key != configured_key:
-                raise HTTPException(status_code=401, detail="自动同步需要有效的 X-Sync-Key")
-            await run_sync("dashboard")
-        with factory() as db:
-            return dashboard_payload(db, period_start, period_end, store, tz_name)
+        return await live_dashboard_payload(selected_store, period_start, period_end)
     except HTTPException:
         raise
     except RuntimeError as exc:
