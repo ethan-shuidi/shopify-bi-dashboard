@@ -145,8 +145,11 @@ async function renderCharts() {
 
 async function loadRuntime() {
   try {
-    const response = await fetch("./ideadock.runtime.json", { cache: "no-store" })
-    if (!response.ok) throw new Error("runtime config unavailable")
+    const [response, verifyResponse] = await Promise.all([
+      fetch("./ideadock.runtime.json", { cache: "no-store" }),
+      fetch("./ideadock.verify.json", { cache: "no-store" }),
+    ])
+    if (!response.ok || !verifyResponse.ok) throw new Error("runtime config unavailable")
     const config = await response.json()
     apiBase.value = String(config.backend_base_url || "").replace(/\/$/, "")
   } catch {
