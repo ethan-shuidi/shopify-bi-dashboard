@@ -216,6 +216,18 @@ query Orders($first: Int!, $after: String, $search: String!) {
 }
 """
 
+SHOPIFYQL_QUERY = """#graphql
+query ShopifyQL($query: String!) {
+  shopifyqlQuery(query: $query) {
+    tableData {
+      columns { name dataType displayName }
+      rows
+    }
+    parseErrors
+  }
+}
+"""
+
 
 def utcnow() -> datetime:
     # MySQL DATETIME does not preserve timezone information. Keep every
@@ -788,6 +800,53 @@ async def fetch_orders_for_dates(store: dict[str, str], start: date, end: date) 
     return orders
 
 
+def shopifyql_number(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    text_value = str(value).strip().replace(",", "")
+    if text_value.endswith("%"):
+        text_value = text_value[:-1]
+    try:
+        return float(text_value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def fetch_traffic_conversion(store: dict[str, str], start: date, end: date) -> dict[str, Any] | None:
+    """Read Shopify's online-store session conversion metric for one period."""
+    query = (
+        "FROM sessions SHOW sessions, conversion_rate "
+        "WHERE human_or_bot_session = 'human' "
+        f"SINCE {start.isoformat()} UNTIL {(end - timedelta(days=1)).isoformat()}"
+    )
+    timeout = httpx.Timeout(45.0, connect=10.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            token = await get_access_token(client, store)
+            response = await client.post(
+                f"https://{store['store']}/admin/api/{store['api_version']}/graphql.json",
+                headers={"x-shopify-access-token": token, "content-type": "application/json"},
+                json={"query": SHOPIFYQL_QUERY, "variables": {"query": query}},
+            )
+            response.raise_for_status()
+            body = response.json()
+            if body.get("errors"):
+                return None
+            result = (body.get("data") or {}).get("shopifyqlQuery") or {}
+            if result.get("parseErrors"):
+                return None
+            rows = ((result.get("tableData") or {}).get("rows") or [])
+            if not rows:
+                return {"sessions": 0, "conversion_rate": 0.0}
+            row = rows[0]
+            return {
+                "sessions": int(shopifyql_number(row.get("sessions")) or 0),
+                "conversion_rate": shopifyql_number(row.get("conversion_rate")),
+            }
+    except (httpx.HTTPError, RuntimeError, KeyError, TypeError, ValueError):
+        return None
+
+
 def order_local_date(created_at: datetime, timezone_name: str) -> date:
     tz = ZoneInfo(timezone_name)
     utc_dt = created_at.replace(tzinfo=timezone.utc)
@@ -973,7 +1032,11 @@ async def live_dashboard_payload(store: dict[str, str], start: date, end: date) 
     """Build the Shopify dashboard from the requested live API range."""
     days = (end - start).days
     previous_start = start - timedelta(days=days)
-    payloads = await fetch_orders_for_dates(store, previous_start, end)
+    payloads, traffic_current, traffic_previous = await asyncio.gather(
+        fetch_orders_for_dates(store, previous_start, end),
+        fetch_traffic_conversion(store, start, end),
+        fetch_traffic_conversion(store, previous_start, start),
+    )
     rows = [row for payload in payloads if (row := live_order_row(payload, store)) is not None]
 
     def aggregate(range_start: date, range_end: date) -> dict[str, Any]:
@@ -1016,6 +1079,11 @@ async def live_dashboard_payload(store: dict[str, str], start: date, end: date) 
     current = aggregate(start, end)
     previous = aggregate(previous_start, start)
     current["changes"] = {key: percentage_change(current[key], previous[key]) for key in ("orders", "sales", "refunds", "net_sales", "units", "presale_units")}
+    traffic_changes = None
+    if traffic_current and traffic_previous:
+        traffic_changes = percentage_change(
+            traffic_current.get("conversion_rate"), traffic_previous.get("conversion_rate")
+        )
     return {
         "period": {"days": days, "start": start.isoformat(), "end": (end - timedelta(days=1)).isoformat()},
         "store": store["store"],
@@ -1024,6 +1092,10 @@ async def live_dashboard_payload(store: dict[str, str], start: date, end: date) 
         "daily": current["daily"],
         "sku_breakdown": current["sku_breakdown"],
         "fulfillment": current["fulfillment"],
+        "traffic": {
+            **(traffic_current or {"sessions": None, "conversion_rate": None}),
+            "change": traffic_changes,
+        },
         "stores": [{"domain": item["store"], "name": item["name"]} for item in read_stores()],
         "last_sync": {"at": utcnow().isoformat(), "message": "已直接从 Shopify 实时读取"},
         "timezone": store["timezone"],
