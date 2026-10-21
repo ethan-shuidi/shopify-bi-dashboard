@@ -43,9 +43,10 @@ const fulfillmentLabels = {
   UNKNOWN: "未知",
 }
 
-const money = (value, digits = 0) => new Intl.NumberFormat("zh-CN", {
+const money = (value, digits = 2) => new Intl.NumberFormat("zh-CN", {
   style: "currency",
   currency: dashboard.value?.currency || "USD",
+  minimumFractionDigits: digits,
   maximumFractionDigits: digits,
 }).format(Number(value || 0))
 const number = (value) => new Intl.NumberFormat("zh-CN").format(Number(value || 0))
