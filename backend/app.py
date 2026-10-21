@@ -4,6 +4,7 @@ import os
 import re
 import base64
 import hashlib
+import logging
 import time
 from urllib.parse import quote
 from datetime import date, datetime, timedelta, timezone
@@ -37,6 +38,7 @@ from sqlalchemy.orm import Session, declarative_base, relationship, sessionmaker
 
 
 app = FastAPI(title="Shopify BI Dashboard API", version="1.0.0")
+logger = logging.getLogger(__name__)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -649,13 +651,46 @@ def source_color(item: dict[str, Any]) -> str | None:
         *(option for option in options if isinstance(option, dict)),
         *(attribute for attribute in attributes if isinstance(attribute, dict)),
     ]
-    color_names = {"color", "colour", "颜色", "颜色/色彩"}
+    color_names = {
+        "color", "colour", "颜色", "颜色/色彩",
+        "色", "カラー", "色/カラー", "カラー/色", "色（カラー）", "カラー（色）",
+    }
     for candidate in candidates:
         name = str(candidate.get("name") or candidate.get("key") or "").strip().lower()
         value = str(candidate.get("value") or "").strip()
         if name in color_names and value:
-            return value
+            return translate_japanese_color(value)
     return None
+
+
+JAPANESE_COLOR_TRANSLATIONS = {
+    "ブラック": "Black",
+    "黒": "Black",
+    "シルバー": "Silver",
+    "銀": "Silver",
+    "オレンジ": "Orange",
+    "橙": "Orange",
+    "レッド": "Red",
+    "赤": "Red",
+    "ブルー": "Blue",
+    "青": "Blue",
+    "ホワイト": "White",
+    "白": "White",
+    "グレー": "Gray",
+    "灰色": "Gray",
+    "グリーン": "Green",
+    "緑": "Green",
+    "ピンク": "Pink",
+    "ブラウン": "Brown",
+    "茶色": "Brown",
+    "チェリーレッド": "Cherry Red",
+}
+
+
+def translate_japanese_color(value: str) -> str:
+    """Keep Shopify's source label and append an English aid for Japanese colors."""
+    english = JAPANESE_COLOR_TRANSLATIONS.get(value)
+    return f"{value} ({english})" if english else value
 
 
 def classify_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -830,37 +865,51 @@ def shopifyql_number(value: Any) -> float | None:
 
 async def fetch_traffic_conversion(store: dict[str, str], start: date, end: date) -> dict[str, Any] | None:
     """Read Shopify's online-store session conversion metric for one period."""
-    query = (
+    query_end = (end - timedelta(days=1)).isoformat()
+    queries = (
         "FROM sessions SHOW sessions, conversion_rate "
         "WHERE human_or_bot_session = 'human' "
-        f"SINCE {start.isoformat()} UNTIL {(end - timedelta(days=1)).isoformat()}"
+        f"SINCE {start.isoformat()} UNTIL {query_end}",
+        "FROM sessions SHOW sessions, conversion_rate "
+        f"SINCE {start.isoformat()} UNTIL {query_end}",
     )
     timeout = httpx.Timeout(45.0, connect=10.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             token = await get_access_token(client, store)
-            response = await client.post(
-                f"https://{store['store']}/admin/api/{store['api_version']}/graphql.json",
-                headers={"x-shopify-access-token": token, "content-type": "application/json"},
-                json={"query": SHOPIFYQL_QUERY, "variables": {"query": query}},
-            )
-            response.raise_for_status()
-            body = response.json()
-            if body.get("errors"):
-                return None
-            result = (body.get("data") or {}).get("shopifyqlQuery") or {}
-            if result.get("parseErrors"):
-                return None
-            rows = ((result.get("tableData") or {}).get("rows") or [])
-            if not rows:
-                return {"sessions": 0, "conversion_rate": 0.0}
-            row = rows[0]
-            return {
-                "sessions": int(shopifyql_number(row.get("sessions")) or 0),
-                "conversion_rate": shopifyql_number(row.get("conversion_rate")),
-            }
+            for query_index, query in enumerate(queries):
+                response = await client.post(
+                    f"https://{store['store']}/admin/api/{store['api_version']}/graphql.json",
+                    headers={"x-shopify-access-token": token, "content-type": "application/json"},
+                    json={"query": SHOPIFYQL_QUERY, "variables": {"query": query}},
+                )
+                response.raise_for_status()
+                body = response.json()
+                if body.get("errors"):
+                    logger.warning(
+                        "ShopifyQL traffic query failed for %s (variant=%s): %s",
+                        store["store"], query_index + 1, str(body["errors"])[:500],
+                    )
+                    continue
+                result = (body.get("data") or {}).get("shopifyqlQuery") or {}
+                if result.get("parseErrors"):
+                    logger.warning(
+                        "ShopifyQL traffic parse failed for %s (variant=%s): %s",
+                        store["store"], query_index + 1, str(result["parseErrors"])[:500],
+                    )
+                    continue
+                rows = ((result.get("tableData") or {}).get("rows") or [])
+                if not rows:
+                    return {"sessions": 0, "conversion_rate": 0.0}
+                row = rows[0]
+                return {
+                    "sessions": int(shopifyql_number(row.get("sessions")) or 0),
+                    "conversion_rate": shopifyql_number(row.get("conversion_rate")),
+                }
+            return {"sessions": None, "conversion_rate": None, "error_code": "shopifyql_unavailable"}
     except (httpx.HTTPError, RuntimeError, KeyError, TypeError, ValueError):
-        return None
+        logger.exception("ShopifyQL traffic request failed for %s", store["store"])
+        return {"sessions": None, "conversion_rate": None, "error_code": "shopifyql_request_failed"}
 
 
 def order_local_date(created_at: datetime, timezone_name: str) -> date:

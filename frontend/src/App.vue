@@ -80,7 +80,7 @@ const commercePulse = computed(() => [
   { label: "平均客单价", value: money(averageOrderValue.value, 2), note: "每笔订单净销售", tone: "cyan" },
   { label: "退款率", value: percent(refundRate.value), note: "退款金额 / 销售额", tone: refundRate.value > 5 ? "gold" : "emerald" },
   { label: "履约完成率", value: percent(fulfillmentRate.value), note: `${number(fulfilledOrders.value)} / ${number(fulfillmentTotal.value)} 单`, tone: "violet" },
-  { label: "流量转化率", value: trafficConversion.value === null || trafficConversion.value === undefined ? "暂无数据" : percent(trafficConversion.value), note: dashboard.value?.traffic?.sessions === null || dashboard.value?.traffic?.sessions === undefined ? "Shopify 在线店铺会话" : `${number(dashboard.value.traffic.sessions)} 次会话`, tone: "cyan" },
+  { label: "流量转化率", value: trafficConversion.value === null || trafficConversion.value === undefined ? "暂无数据" : percent(trafficConversion.value), note: dashboard.value?.traffic?.error_code ? "Shopify 会话数据暂不可用，请检查 Analytics 权限" : dashboard.value?.traffic?.sessions === null || dashboard.value?.traffic?.sessions === undefined ? "Shopify 在线店铺会话" : `${number(dashboard.value.traffic.sessions)} 次会话`, tone: "cyan" },
   { label: "销量最高商品", value: topSku.value?.sku || "—", note: topSku.value ? `${topSku.value.color || "默认款"} · ${number(topSku.value.units)} 件` : "暂无商品数据", tone: "gold" },
 ])
 const maxFulfillment = computed(() => Math.max(...(dashboard.value?.fulfillment || []).map((row) => row.orders), 1))
