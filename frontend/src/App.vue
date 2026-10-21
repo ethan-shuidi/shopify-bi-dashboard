@@ -51,6 +51,10 @@ const money = (value, digits = 2) => new Intl.NumberFormat("zh-CN", {
 }).format(Number(value || 0))
 const number = (value) => new Intl.NumberFormat("zh-CN").format(Number(value || 0))
 const percent = (value) => `${Number(value || 0).toFixed(1)}%`
+const precisePercent = (value) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "暂无数据"
+  return `${Number(value).toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}%`
+}
 const changeText = (value) => {
   if (value === null || value === undefined) return "上期无可比数据"
   if (value === 0) return "与上期持平"
@@ -74,13 +78,16 @@ const fulfilledOrders = computed(() => (dashboard.value?.fulfillment || []).filt
 const fulfillmentRate = computed(() => fulfillmentTotal.value ? fulfilledOrders.value / fulfillmentTotal.value * 100 : 0)
 const averageOrderValue = computed(() => dashboard.value?.totals?.orders ? dashboard.value.totals.net_sales / dashboard.value.totals.orders : 0)
 const refundRate = computed(() => dashboard.value?.totals?.sales ? dashboard.value.totals.refunds / dashboard.value.totals.sales * 100 : 0)
-const trafficConversion = computed(() => dashboard.value?.traffic?.conversion_rate)
+const trafficConversion = computed(() => {
+  const value = dashboard.value?.traffic?.conversion_rate
+  return value === null || value === undefined ? value : Number(value) * 100
+})
 const topSku = computed(() => dashboard.value?.sku_breakdown?.[0] || null)
 const commercePulse = computed(() => [
   { label: "平均客单价", value: money(averageOrderValue.value, 2), note: "每笔订单净销售", tone: "cyan" },
   { label: "退款率", value: percent(refundRate.value), note: "退款金额 / 销售额", tone: refundRate.value > 5 ? "gold" : "emerald" },
   { label: "履约完成率", value: percent(fulfillmentRate.value), note: `${number(fulfilledOrders.value)} / ${number(fulfillmentTotal.value)} 单`, tone: "violet" },
-  { label: "流量转化率", value: trafficConversion.value === null || trafficConversion.value === undefined ? "暂无数据" : percent(trafficConversion.value), note: dashboard.value?.traffic?.error_code ? "Shopify 会话数据暂不可用，请检查 Analytics 权限" : dashboard.value?.traffic?.sessions === null || dashboard.value?.traffic?.sessions === undefined ? "Shopify 在线店铺会话" : `${number(dashboard.value.traffic.sessions)} 次会话`, tone: "cyan" },
+  { label: "流量转化率", value: precisePercent(trafficConversion.value), note: dashboard.value?.traffic?.error_code ? "Shopify 会话数据暂不可用，请检查 Analytics 权限" : dashboard.value?.traffic?.sessions === null || dashboard.value?.traffic?.sessions === undefined ? "会话数暂无数据" : `${number(dashboard.value.traffic.sessions)} 次会话`, tone: "cyan" },
   { label: "销量最高商品", value: topSku.value?.sku || "—", note: topSku.value ? `${topSku.value.color || "默认款"} · ${number(topSku.value.units)} 件` : "暂无商品数据", tone: "gold" },
 ])
 const maxFulfillment = computed(() => Math.max(...(dashboard.value?.fulfillment || []).map((row) => row.orders), 1))
