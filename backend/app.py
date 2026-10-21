@@ -210,7 +210,11 @@ query Orders($first: Int!, $after: String, $search: String!) {
       currentTotalPriceSet { shopMoney { amount currencyCode } }
       totalPriceSet { shopMoney { amount currencyCode } }
       totalRefundedSet { shopMoney { amount currencyCode } }
-      lineItems(first: 250) { edges { node { id title sku quantity } } }
+      lineItems(first: 250) { edges { node {
+        id title sku quantity variantTitle
+        variant { selectedOptions { name value } }
+        customAttributes { key value }
+      } } }
     } }
   }
 }
@@ -629,19 +633,29 @@ def sku_unit_value(raw_sku: Any) -> int:
     return value if value in ALLOWED_SUFFIX_VALUES else 1
 
 
-def sku_color(raw_sku: Any, title: Any = "") -> str:
-    sku = normalized_sku(raw_sku)
+def special_item_color(title: Any = "") -> str:
     if title_matches(title, WARRANTY_KEYWORDS):
         return "延保服务"
     if not title_matches(title, FINAL_PAYMENT_KEYWORDS) and title_matches(title, PRESALE_KEYWORDS):
         return "预售"
-    if sku in {"X0051AFG1N", "TN10P011", "TN10P051", "TN20P011"} or sku.startswith("TN10P011-"):
-        return "黑色"
-    if sku in {"TN10P012", "TN10P052", "TN20P012"} or sku.startswith("TN10P012-"):
-        return "银色"
-    if sku in {"TN10P013", "TN10P053", "TN20P014"} or sku.startswith("TN10P013-"):
-        return "樱桃红" if sku == "TN20P014" else "橙色"
     return "未分类"
+
+
+def source_color(item: dict[str, Any]) -> str | None:
+    """Read the color option recorded by Shopify for an order line item."""
+    options = ((item.get("variant") or {}).get("selectedOptions") or [])
+    attributes = item.get("customAttributes") or []
+    candidates = [
+        *(option for option in options if isinstance(option, dict)),
+        *(attribute for attribute in attributes if isinstance(attribute, dict)),
+    ]
+    color_names = {"color", "colour", "颜色", "颜色/色彩"}
+    for candidate in candidates:
+        name = str(candidate.get("name") or candidate.get("key") or "").strip().lower()
+        value = str(candidate.get("value") or "").strip()
+        if name in color_names and value:
+            return value
+    return None
 
 
 def classify_item(item: dict[str, Any]) -> dict[str, Any]:
@@ -661,11 +675,13 @@ def classify_item(item: dict[str, Any]) -> dict[str, Any]:
     else:
         item_type = "product"
         effective_units = raw_quantity * multiplier
+    special_color = special_item_color(title)
+    color = special_color if item_type in {"warranty", "presale"} else (source_color(item) or "未分类")
     return {
         "shopify_line_item_id": item.get("id") or f"generated-{sku}-{title}",
         "title": title,
         "sku": sku,
-        "color": sku_color(item.get("sku"), title),
+        "color": color,
         "raw_quantity": raw_quantity,
         "unit_multiplier": multiplier,
         "effective_units": effective_units,
