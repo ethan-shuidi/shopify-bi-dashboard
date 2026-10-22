@@ -1136,7 +1136,7 @@ async def live_dashboard_payload(store: dict[str, str], start: date, end: date) 
             "units": sum(row["units"] for row in selected),
             "presale_units": sum(item["raw_quantity"] * item["unit_multiplier"] for row in selected for item in row["items"] if item["item_type"] == "presale"),
             "daily": daily_rows,
-            "sku_breakdown": [{"sku": sku, "color": color, "units": units} for (sku, color), units in sorted(sku_totals.items(), key=lambda pair: pair[1], reverse=True)[:12]],
+            "sku_breakdown": [{"sku": sku, "color": color, "units": units} for (sku, color), units in sorted(sku_totals.items(), key=lambda pair: pair[1], reverse=True)],
             "fulfillment": [{"status": status, "orders": count} for status, count in sorted(fulfillment_totals.items(), key=lambda pair: pair[1], reverse=True)],
             "currency": next((row["currency"] for row in selected), "USD"),
         }

@@ -18,6 +18,9 @@ const status = ref(null)
 const dashboard = ref(null)
 const period = ref("7")
 const store = ref("")
+const selectedProducts = ref([])
+const productMenuOpen = ref(false)
+const productMenuElement = ref(null)
 const salesChartElement = ref(null)
 const productChartElement = ref(null)
 
@@ -82,7 +85,18 @@ const trafficConversion = computed(() => {
   const value = dashboard.value?.traffic?.conversion_rate
   return value === null || value === undefined ? value : Number(value) * 100
 })
-const topSku = computed(() => dashboard.value?.sku_breakdown?.[0] || null)
+const productOptions = computed(() => [...new Set((dashboard.value?.sku_breakdown || []).map((row) => row.sku).filter(Boolean))])
+const filteredProductRows = computed(() => {
+  const rows = dashboard.value?.sku_breakdown || []
+  return rows.filter((row) => selectedProducts.value.includes(row.sku))
+})
+const allProductsSelected = computed(() => productOptions.value.length > 0 && selectedProducts.value.length === productOptions.value.length)
+const productFilterLabel = computed(() => {
+  if (allProductsSelected.value) return "全部商品"
+  if (selectedProducts.value.length === 1) return selectedProducts.value[0]
+  return `已选 ${selectedProducts.value.length} 个商品`
+})
+const topSku = computed(() => filteredProductRows.value[0] || null)
 const commercePulse = computed(() => [
   { label: "平均客单价", value: money(averageOrderValue.value, 2), note: "每笔订单净销售", tone: "cyan" },
   { label: "退款率", value: percent(refundRate.value), note: "退款金额 / 销售额", tone: refundRate.value > 5 ? "gold" : "emerald" },
@@ -128,12 +142,16 @@ function renderSalesChart() {
 }
 
 function renderProductChart() {
-  if (!productChartElement.value || !dashboard.value?.sku_breakdown?.length) return
+  if (!productChartElement.value) return
   if (!productChart || productChart.getDom() !== productChartElement.value) {
     productChart?.dispose()
     productChart = init(productChartElement.value)
   }
-  const rows = [...dashboard.value.sku_breakdown].slice(0, 10).reverse()
+  const rows = [...filteredProductRows.value].slice(0, 10).reverse()
+  if (!rows.length) {
+    productChart.clear()
+    return
+  }
   productChart.setOption({
     aria: { enabled: true, description: "商品销量排名横向柱状图，按销量从高到低排序。" },
     animationDuration: 450,
@@ -143,6 +161,25 @@ function renderProductChart() {
     yAxis: { type: "category", data: rows.map((row) => `${row.sku}${row.color ? ` · ${row.color}` : ""}`), axisLine: { show: false }, axisTick: { show: false }, axisLabel: { color: "#334e73", fontSize: 13, width: 180, overflow: "truncate" } },
     series: [{ type: "bar", data: rows.map((row) => row.units), barMaxWidth: 22, itemStyle: { color: "#3b82f6", borderRadius: [0, 6, 6, 0] }, label: { show: true, position: "right", color: "#173c6b", fontSize: 13, fontWeight: 700, formatter: ({ value }) => `${number(value)} 件` } }],
   }, true)
+}
+
+function toggleAllProducts() {
+  selectedProducts.value = allProductsSelected.value ? [] : [...productOptions.value]
+}
+
+function toggleProduct(sku) {
+  selectedProducts.value = selectedProducts.value.includes(sku)
+    ? selectedProducts.value.filter((item) => item !== sku)
+    : [...selectedProducts.value, sku]
+}
+
+function handleDocumentClick(event) {
+  if (productMenuElement.value && !productMenuElement.value.contains(event.target)) productMenuOpen.value = false
+}
+
+function syncProductSelection(nextDashboard) {
+  const options = [...new Set((nextDashboard?.sku_breakdown || []).map((row) => row.sku).filter(Boolean))]
+  selectedProducts.value = options
 }
 
 async function renderCharts() {
@@ -198,6 +235,7 @@ async function loadDashboard({ autoSync = true } = {}) {
     const nextDashboard = await api(`/api/dashboard?${buildDashboardQuery()}`)
     if (!store.value && nextDashboard.store) store.value = nextDashboard.store
     dashboard.value = nextDashboard
+    syncProductSelection(nextDashboard)
   } catch (exception) {
     error.value = exception.message
   } finally {
@@ -244,6 +282,7 @@ watch(period, (value) => {
 })
 watch(store, () => loadDashboard({ autoSync: false }))
 watch(dashboard, renderCharts, { flush: "post" })
+watch(selectedProducts, renderCharts, { flush: "post" })
 
 onMounted(async () => {
   resizeObserver = new ResizeObserver(() => {
@@ -252,6 +291,7 @@ onMounted(async () => {
   })
   await loadRuntime()
   await loadDashboard({ autoSync: false })
+  document.addEventListener("click", handleDocumentClick)
   await nextTick()
   if (salesChartElement.value) resizeObserver.observe(salesChartElement.value)
   if (productChartElement.value) resizeObserver.observe(productChartElement.value)
@@ -259,6 +299,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect()
+  document.removeEventListener("click", handleDocumentClick)
   salesChart?.dispose()
   productChart?.dispose()
 })
@@ -303,6 +344,26 @@ onBeforeUnmount(() => {
           <span>经营主体</span>
           <div class="select-wrap"><select v-model="store"><option v-for="item in dashboard?.stores || []" :key="item.domain" :value="item.domain">{{ item.name }}</option></select><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg></div>
         </label>
+        <div ref="productMenuElement" class="filter-field product-filter-field">
+          <span>商品</span>
+          <div class="product-filter">
+            <button type="button" class="product-filter-trigger" :aria-expanded="productMenuOpen" @click.stop="productMenuOpen = !productMenuOpen">
+              <span>{{ productFilterLabel }}</span>
+              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>
+            </button>
+            <div v-if="productMenuOpen" class="product-filter-menu" role="group" aria-label="商品筛选">
+              <label class="product-option product-option-all">
+                <input type="checkbox" :checked="allProductsSelected" @change="toggleAllProducts">
+                <span>全部商品</span>
+              </label>
+              <label v-for="sku in productOptions" :key="sku" class="product-option">
+                <input type="checkbox" :checked="selectedProducts.includes(sku)" @change="toggleProduct(sku)">
+                <span>{{ sku }}</span>
+              </label>
+              <p v-if="!productOptions.length" class="product-filter-empty">当前范围暂无商品</p>
+            </div>
+          </div>
+        </div>
         <div v-if="period === 'custom'" class="custom-date-group">
           <label class="filter-field"><span>开始日期</span><input v-model="customStart" type="date" :max="customEnd || undefined"></label>
           <label class="filter-field"><span>结束日期</span><input v-model="customEnd" type="date" :min="customStart || undefined"></label>
@@ -348,8 +409,8 @@ onBeforeUnmount(() => {
           </article>
 
           <article class="panel product-panel">
-            <div class="panel-heading"><div><span class="section-label">商品表现</span><h2>商品销量排名</h2></div><span>按 SKU 与颜色汇总 · TOP {{ Math.min(dashboard.sku_breakdown.length, 10) }}</span></div>
-            <div v-if="dashboard.sku_breakdown.length" ref="productChartElement" class="echart product-chart" role="img" aria-label="商品销量排名横向柱状图"></div>
+            <div class="panel-heading"><div><span class="section-label">商品表现</span><h2>商品销量排名</h2></div><span>按 SKU 与颜色汇总 · TOP {{ Math.min(filteredProductRows.length, 10) }}</span></div>
+            <div v-if="filteredProductRows.length" ref="productChartElement" class="echart product-chart" role="img" aria-label="商品销量排名横向柱状图"></div>
             <div v-else class="empty-state">当前范围暂无商品销量</div>
           </article>
         </section>
