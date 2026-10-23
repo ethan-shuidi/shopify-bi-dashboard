@@ -93,9 +93,9 @@ const filteredProductRows = computed(() => {
 })
 const allProductsSelected = computed(() => productOptions.value.length > 0 && pendingProducts.value.length === productOptions.value.length)
 const productFilterLabel = computed(() => {
-  if (allProductsSelected.value) return "全部商品"
-  if (pendingProducts.value.length === 1) return pendingProducts.value[0]
-  return `已选 ${pendingProducts.value.length} 个商品`
+  if (selectedProducts.value.length === productOptions.value.length && productOptions.value.length > 0) return "全部商品"
+  if (selectedProducts.value.length === 1) return selectedProducts.value[0]
+  return `已选 ${selectedProducts.value.length} 个商品`
 })
 const topSku = computed(() => filteredProductRows.value[0] || null)
 const commercePulse = computed(() => [
@@ -174,9 +174,11 @@ function toggleProduct(sku) {
     : [...pendingProducts.value, sku]
 }
 
-function applyProductFilter() {
+async function applyProductFilter() {
   selectedProducts.value = [...pendingProducts.value]
   productMenuOpen.value = false
+  await nextTick()
+  renderProductChart()
 }
 
 function handleDocumentClick(event) {
@@ -370,7 +372,7 @@ onBeforeUnmount(() => {
               </label>
               <p v-if="!productOptions.length" class="product-filter-empty">当前范围暂无商品</p>
               <div class="product-filter-actions">
-                <button type="button" class="product-filter-apply" :disabled="!productOptions.length" @click="applyProductFilter">应用</button>
+                <button type="button" class="product-filter-apply" :disabled="!productOptions.length" @click.stop="applyProductFilter">应用</button>
               </div>
             </div>
           </div>
