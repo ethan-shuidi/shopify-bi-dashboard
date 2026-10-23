@@ -19,6 +19,7 @@ const dashboard = ref(null)
 const period = ref("7")
 const store = ref("")
 const selectedProducts = ref([])
+const pendingProducts = ref([])
 const productMenuOpen = ref(false)
 const productMenuElement = ref(null)
 const salesChartElement = ref(null)
@@ -90,11 +91,11 @@ const filteredProductRows = computed(() => {
   const rows = dashboard.value?.sku_breakdown || []
   return rows.filter((row) => selectedProducts.value.includes(row.sku))
 })
-const allProductsSelected = computed(() => productOptions.value.length > 0 && selectedProducts.value.length === productOptions.value.length)
+const allProductsSelected = computed(() => productOptions.value.length > 0 && pendingProducts.value.length === productOptions.value.length)
 const productFilterLabel = computed(() => {
   if (allProductsSelected.value) return "全部商品"
-  if (selectedProducts.value.length === 1) return selectedProducts.value[0]
-  return `已选 ${selectedProducts.value.length} 个商品`
+  if (pendingProducts.value.length === 1) return pendingProducts.value[0]
+  return `已选 ${pendingProducts.value.length} 个商品`
 })
 const topSku = computed(() => filteredProductRows.value[0] || null)
 const commercePulse = computed(() => [
@@ -164,13 +165,18 @@ function renderProductChart() {
 }
 
 function toggleAllProducts() {
-  selectedProducts.value = allProductsSelected.value ? [] : [...productOptions.value]
+  pendingProducts.value = allProductsSelected.value ? [] : [...productOptions.value]
 }
 
 function toggleProduct(sku) {
-  selectedProducts.value = selectedProducts.value.includes(sku)
-    ? selectedProducts.value.filter((item) => item !== sku)
-    : [...selectedProducts.value, sku]
+  pendingProducts.value = pendingProducts.value.includes(sku)
+    ? pendingProducts.value.filter((item) => item !== sku)
+    : [...pendingProducts.value, sku]
+}
+
+function applyProductFilter() {
+  selectedProducts.value = [...pendingProducts.value]
+  productMenuOpen.value = false
 }
 
 function handleDocumentClick(event) {
@@ -180,6 +186,7 @@ function handleDocumentClick(event) {
 function syncProductSelection(nextDashboard) {
   const options = [...new Set((nextDashboard?.sku_breakdown || []).map((row) => row.sku).filter(Boolean))]
   selectedProducts.value = options
+  pendingProducts.value = [...options]
 }
 
 async function renderCharts() {
@@ -282,7 +289,8 @@ watch(period, (value) => {
 })
 watch(store, () => loadDashboard({ autoSync: false }))
 watch(dashboard, renderCharts, { flush: "post" })
-watch(selectedProducts, renderCharts, { flush: "post" })
+watch(selectedProducts, () => nextTick(renderProductChart), { flush: "post", deep: true })
+watch(filteredProductRows, () => nextTick(renderProductChart), { flush: "post" })
 
 onMounted(async () => {
   resizeObserver = new ResizeObserver(() => {
@@ -357,10 +365,13 @@ onBeforeUnmount(() => {
                 <span>全部商品</span>
               </label>
               <label v-for="sku in productOptions" :key="sku" class="product-option">
-                <input type="checkbox" :checked="selectedProducts.includes(sku)" @change="toggleProduct(sku)">
+                <input type="checkbox" :checked="pendingProducts.includes(sku)" @change="toggleProduct(sku)">
                 <span>{{ sku }}</span>
               </label>
               <p v-if="!productOptions.length" class="product-filter-empty">当前范围暂无商品</p>
+              <div class="product-filter-actions">
+                <button type="button" class="product-filter-apply" :disabled="!productOptions.length" @click="applyProductFilter">应用</button>
+              </div>
             </div>
           </div>
         </div>
